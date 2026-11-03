@@ -1,0 +1,8 @@
+com.miaohui.drawassist.app-pngs-0 D:\Project\CopyDraw\app\build\generated\res\pngs\release
+com.miaohui.drawassist.app-updated_navigation_xml-1 D:\Project\CopyDraw\app\build\generated\updated_navigation_xml\release
+com.miaohui.drawassist.app-packageReleaseResources-2 D:\Project\CopyDraw\app\build\intermediates\incremental\release\packageReleaseResources\merged.dir
+com.miaohui.drawassist.app-packageReleaseResources-3 D:\Project\CopyDraw\app\build\intermediates\incremental\release\packageReleaseResources\stripped.dir
+com.miaohui.drawassist.app-release-4 D:\Project\CopyDraw\app\build\intermediates\merged_res\release\mergeReleaseResources
+com.miaohui.drawassist.app-main-5 D:\Project\CopyDraw\app\src\main\res
+com.miaohui.drawassist.app-release-6 D:\Project\CopyDraw\app\src\release\res
+gradleHome-0 C:\Users\Administrator\.gradle

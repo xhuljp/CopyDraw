@@ -1,0 +1,66 @@
+1<?xml version="1.0" encoding="utf-8"?>
+2<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+3    package="com.miaohui.drawassist"
+4    android:versionCode="1"
+5    android:versionName="1.0.0" >
+6
+7    <uses-sdk
+7-->INJECTED
+8        android:minSdkVersion="24"
+8-->INJECTED
+9        android:targetSdkVersion="35" />
+9-->INJECTED
+10
+11    <uses-permission android:name="android.permission.CAMERA" />
+11-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:2:5-65
+11-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:2:22-62
+12
+13    <uses-feature
+13-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:3:5-85
+14        android:name="android.hardware.camera"
+14-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:3:19-57
+15        android:required="false" />
+15-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:3:58-82
+16
+17    <application
+17-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:4:5-21:19
+18        android:allowBackup="false"
+18-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:5:9-36
+19        android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+19-->[androidx.core:core:1.1.0] C:\Users\Administrator\.gradle\caches\9.6.1\transforms\e7119d40d3ce743cc5eb3bd8c09b1a40\transformed\core-1.1.0\AndroidManifest.xml:24:18-86
+20        android:extractNativeLibs="false"
+20-->INJECTED
+21        android:icon="@mipmap/ic_launcher_custom"
+21-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:7:9-50
+22        android:label="描绘"
+22-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:6:9-27
+23        android:roundIcon="@mipmap/ic_launcher_custom"
+23-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:8:9-55
+24        android:theme="@style/AppTheme"
+24-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:9:9-40
+25        android:usesCleartextTraffic="false" >
+25-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:10:9-45
+26        <activity
+26-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:11:9-20:20
+27            android:name="com.miaohui.drawassist.MainActivity"
+27-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:12:13-41
+28            android:configChanges="orientation|screenSize|keyboardHidden"
+28-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:13:13-74
+29            android:exported="true"
+29-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:14:13-36
+30            android:screenOrientation="unspecified" >
+30-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:15:13-52
+31            <intent-filter>
+31-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:16:13-19:29
+32                <action android:name="android.intent.action.MAIN" />
+32-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:17:17-69
+32-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:17:25-66
+33
+34                <category android:name="android.intent.category.LAUNCHER" />
+34-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:18:17-77
+34-->D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:18:27-74
+35            </intent-filter>
+36        </activity>
+37    </application>
+38
+39</manifest>

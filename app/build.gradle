@@ -1,0 +1,35 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.miaohui.drawassist'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.miaohui.drawassist'
+        minSdk 24
+        targetSdk 35
+        versionCode 1
+        versionName '1.0.0'
+    }
+
+    signingConfigs {
+        release {
+            storeFile rootProject.file('密钥/vivo_owner.keystore')
+            storePassword CD_STORE_PASSWORD
+            keyAlias CD_KEY_ALIAS
+            keyPassword CD_KEY_PASSWORD
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.16.0'
+}

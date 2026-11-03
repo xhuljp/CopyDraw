@@ -1,0 +1,22 @@
+[
+    {
+        "merged": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-debug-6:\\mipmap-anydpi-v26_ic_launcher_round.xml.flat",
+        "source": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-main-8:\\mipmap-anydpi-v26\\ic_launcher_round.xml"
+    },
+    {
+        "merged": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-debug-6:\\drawable_ic_launcher_background.xml.flat",
+        "source": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-main-8:\\drawable\\ic_launcher_background.xml"
+    },
+    {
+        "merged": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-debug-6:\\mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-main-8:\\mipmap-anydpi-v26\\ic_launcher.xml"
+    },
+    {
+        "merged": "com.miaohui.drawassist.app-debug-6:/mipmap-nodpi_ic_launcher_custom.png.flat",
+        "source": "com.miaohui.drawassist.app-main-8:/mipmap-nodpi/ic_launcher_custom.png"
+    },
+    {
+        "merged": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-debug-6:\\drawable_ic_launcher_foreground.xml.flat",
+        "source": "C:\\Users\\Administrator\\.gradle\\daemon\\9.6.1\\com.miaohui.drawassist.app-main-8:\\drawable\\ic_launcher_foreground.xml"
+    }
+]

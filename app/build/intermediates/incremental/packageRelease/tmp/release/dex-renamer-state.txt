@@ -1,0 +1,4 @@
+#Tue Nov 03 16:32:13 CST 2026
+base.0=D\:\\Project\\CopyDraw\\app\\build\\intermediates\\dex\\release\\mergeDexRelease\\classes.dex
+path.0=classes.dex
+renamed.0=classes.dex
