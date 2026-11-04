@@ -53,7 +53,7 @@ MERGED from [androidx.versionedparcelable:versionedparcelable:1.1.0] C:\Users\Ad
 activity#com.miaohui.drawassist.MainActivity
 ADDED from D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:11:9-20:20
 	android:screenOrientation
-		ADDED from D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:15:13-52
+		ADDED from D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:15:13-49
 	android:exported
 		ADDED from D:\Project\CopyDraw\app\src\main\AndroidManifest.xml:14:13-36
 	android:configChanges

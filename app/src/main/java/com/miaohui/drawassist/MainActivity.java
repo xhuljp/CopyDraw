@@ -13,6 +13,7 @@ import android.text.Html;
 import android.text.method.LinkMovementMethod;
 import android.view.TextureView;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.webkit.JavascriptInterface;
 import android.webkit.PermissionRequest;
 import android.webkit.ValueCallback;
@@ -43,6 +44,7 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         getWindow().setStatusBarColor(0xFF101210);
         getWindow().setNavigationBarColor(0xFF101210);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         if (!getPreferences(MODE_PRIVATE).getBoolean("privacyAccepted", false)) {
             TextView policySummary = new TextView(this);
             policySummary.setPadding(48, 8, 48, 12);
@@ -227,6 +229,16 @@ public class MainActivity extends Activity {
         @JavascriptInterface
         public void setFocusLock(boolean lock) {
             runOnUiThread(() -> cameraController.setFocusLock(lock));
+        }
+
+        @JavascriptInterface
+        public void focusAt(float nx, float ny) {
+            runOnUiThread(() -> cameraController.focusAt(nx, ny, false));
+        }
+
+        @JavascriptInterface
+        public void lockFocusAt(float nx, float ny) {
+            runOnUiThread(() -> cameraController.focusAt(nx, ny, true));
         }
 
         @JavascriptInterface

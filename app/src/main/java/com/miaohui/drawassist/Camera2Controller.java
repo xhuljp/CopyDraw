@@ -16,6 +16,7 @@ import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.CaptureFailure;
 import android.hardware.camera2.CaptureResult;
 import android.hardware.camera2.TotalCaptureResult;
+import android.hardware.camera2.params.MeteringRectangle;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.StreamConfigurationMap;
 import android.media.Image;
@@ -53,10 +54,11 @@ import java.util.Set;
  * Native Camera2 viewfinder for the tracing app.
  *
  * The Android WebView only exposes the logical rear camera through
- * navigator.mediaDevices, so the physical ultra wide lens is invisible to the
- * web layer. This controller enumerates every rear facing camera (including the
- * physical sub-cameras of a logical multi camera) and streams the selected one
- * into a TextureView placed underneath a transparent WebView.
+ * navigator.mediaDevices, so the ultra wide lens is invisible to the web layer.
+ * This controller enumerates the rear facing cameras and, when the logical
+ * camera can zoom below 1x, adds an ultra wide entry that is streamed through
+ * the logical camera itself (so autofocus keeps working) into a TextureView
+ * placed underneath a transparent WebView.
  */
 class Camera2Controller {
 
@@ -69,20 +71,20 @@ class Camera2Controller {
     private static final String TAG = "Camera2Controller";
     private static final int MAX_PREVIEW_LONG_EDGE = 1920;
     private static final int MAX_JPEG_LONG_EDGE = 1600;
+    private static final long FREEZE_TIMEOUT_MS = 1500;
 
     private static final class Lens {
-        String key;          // opaque id handed to JS ("0" or "3|0")
-        String cameraId;     // logical / system camera id used with openCamera
-        String physicalId;   // physical sub-camera id, null when not needed
+        String key;          // opaque id handed to JS ("0" or "0@0.60")
+        String cameraId;     // camera id used with openCamera
+        String physicalId;   // hidden physical sub camera to stream, null when unused
         String label;        // "1×" / "0.6×"
         boolean wide;        // true when clearly wider than the main lens
-        float ratio;         // optical zoom ratio relative to the main lens
+        float ratio;         // zoom ratio relative to the main lens
         float focal;         // focal length in mm
         float sensorWidth;   // physical sensor width in mm
         Rect activeArray;
         Range<Float> zoomRatioRange;   // nullable
         float maxCropZoom = 1f;
-        boolean system;      // listed directly by CameraManager
     }
 
     private final Context context;
@@ -114,6 +116,17 @@ class Camera2Controller {
 
     private boolean torchOn;
     private boolean focusLocked;
+    private boolean afSupported;
+    private int[] afAvailableModes;
+    private int maxAfRegions;
+    private int maxAeRegions;
+    private Rect focusBounds;
+    private MeteringRectangle[] afRegions;
+    private MeteringRectangle[] aeRegions;
+    private Float pinnedFocusDistance;   // diopters the lens is frozen at while locked
+    private Float lastFocusDistance;     // latest value reported by the sensor
+    private float minimumFocusDistance;  // largest diopter the lens can reach
+    private boolean freezePending;       // waiting for the lock sweep to converge
     private float zoomRel = 1f;
     private float baseRatio = 1f;      // ratio of the active lens relative to main
     private float matrixZoom = 1f;     // extra scale applied on the TextureView
@@ -193,36 +206,45 @@ class Camera2Controller {
         mainKey = "";
         wideKey = "";
         String mainCameraId = null;
+        String[] systemIds;
         try {
-            List<String> systemIds = new ArrayList<>(Arrays.asList(cameraManager.getCameraIdList()));
-            for (String id : systemIds) {
-                CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-                Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-                if (facing == null || facing != CameraCharacteristics.LENS_FACING_BACK) continue;
-                if (mainCameraId == null) mainCameraId = id;
-                addLens(id, null, characteristics, true);
+            systemIds = cameraManager.getCameraIdList();
+        } catch (Exception error) {
+            Log.w(TAG, "getCameraIdList failed", error);
+            return;
+        }
+        for (String id : systemIds) {
+            CameraCharacteristics characteristics;
+            try {
+                characteristics = cameraManager.getCameraCharacteristics(id);
+            } catch (Exception error) {
+                Log.w(TAG, "characteristics " + id + " failed: " + error);
+                continue;
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                for (String id : systemIds) {
-                    CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(id);
-                    Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-                    if (facing == null || facing != CameraCharacteristics.LENS_FACING_BACK) continue;
-                    Set<String> physicalIds = characteristics.getPhysicalCameraIds();
-                    for (String physicalId : physicalIds) {
-                        try {
-                            CameraCharacteristics physical = cameraManager.getCameraCharacteristics(physicalId);
-                            Integer physicalFacing = physical.get(CameraCharacteristics.LENS_FACING);
-                            if (physicalFacing != null && physicalFacing != CameraCharacteristics.LENS_FACING_BACK) continue;
-                            addLens(id, physicalId, physical, false);
-                        } catch (Exception ignored) {
-                        }
-                    }
+            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+            if (facing == null || facing != CameraCharacteristics.LENS_FACING_BACK) continue;
+            if (mainCameraId == null) mainCameraId = id;
+            lenses.add(buildLens(id, characteristics));
+            if (mainCameraId.equals(id)) {
+                // A logical rear camera that can zoom below 1x exposes its ultra
+                // wide sensor through CONTROL_ZOOM_RATIO. Streaming it through
+                // the logical camera keeps autofocus working, which a physical
+                // sub camera stream cannot provide.
+                Range<Float> zoomRange = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                        ? characteristics.get(CameraCharacteristics.CONTROL_ZOOM_RATIO_RANGE) : null;
+                float wide = zoomRange == null ? 1f : zoomRange.getLower();
+                if (wide > 0.2f && wide < 0.95f) {
+                    Lens lens = buildLens(id, characteristics);
+                    lens.key = id + "@" + String.format(Locale.US, "%.2f", wide);
+                    lens.ratio = wide;
+                    lenses.add(lens);
                 }
             }
-        } catch (Exception error) {
-            Log.w(TAG, "scanLenses failed", error);
         }
-        if (mainCameraId == null) return;
+        if (mainCameraId == null) {
+            Log.w(TAG, "no rear facing camera found");
+            return;
+        }
 
         float mainFov = 0f;
         for (Lens lens : lenses) {
@@ -240,19 +262,17 @@ class Camera2Controller {
 
         List<Lens> keep = new ArrayList<>();
         for (Lens lens : lenses) {
-            float fov = focalLengthToFov(lens);
-            lens.ratio = fov > 0f && mainFov > 0f
-                    ? (float) (Math.tan(mainFov / 2d) / Math.tan(fov / 2d))
-                    : 1f;
+            if (lens.ratio <= 0f) {
+                float fov = focalLengthToFov(lens);
+                // fov is in degrees, Math.tan works in radians.
+                lens.ratio = fov > 0f && mainFov > 0f
+                        ? (float) (Math.tan(Math.toRadians(mainFov) / 2d) / Math.tan(Math.toRadians(fov) / 2d))
+                        : 1f;
+            }
             if (lens.ratio <= 0f || Float.isNaN(lens.ratio)) lens.ratio = 1f;
             boolean duplicate = false;
             for (Lens existing : keep) {
                 if (Math.abs(Math.log(existing.ratio / lens.ratio)) < 0.06d) {
-                    // Prefer the system camera over a physical alias of the same lens.
-                    if (!existing.system && lens.system) {
-                        keep.remove(existing);
-                        break;
-                    }
                     duplicate = true;
                     break;
                 }
@@ -287,15 +307,58 @@ class Camera2Controller {
         for (Lens lens : lenses) {
             if (lens.key.equals(wideKey)) wideRatio = Math.max(0.2f, lens.ratio);
         }
-        Log.i(TAG, "lenses=" + lensesJson() + " main=" + mainKey + " wide=" + wideKey + " ratio=" + wideRatio);
+        if (wideKey.isEmpty()) addPhysicalWide(mainCameraId, mainFov);
     }
 
-    private void addLens(String cameraId, String physicalId, CameraCharacteristics characteristics, boolean system) {
+    /**
+     * Some devices (HyperOS on the Redmi K series, for example) keep the ultra
+     * wide out of getCameraIdList() and report a logical zoom range that starts
+     * at 1.0, so the only way to reach it is to stream the hidden physical sub
+     * camera that owns the wider sensor.
+     */
+    private void addPhysicalWide(String mainCameraId, float mainFov) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P || mainFov <= 0f) return;
+        try {
+            Set<String> physicalIds = cameraManager.getCameraCharacteristics(mainCameraId).getPhysicalCameraIds();
+            Lens widest = null;
+            for (String physicalId : physicalIds) {
+                if (physicalId.equals(mainCameraId)) continue;
+                CameraCharacteristics characteristics;
+                try {
+                    characteristics = cameraManager.getCameraCharacteristics(physicalId);
+                } catch (Exception error) {
+                    Log.w(TAG, "physical characteristics " + physicalId + " failed: " + error);
+                    continue;
+                }
+                Lens lens = buildLens(mainCameraId, characteristics);
+                lens.physicalId = physicalId;
+                lens.key = mainCameraId + "#" + physicalId;
+                float fov = focalLengthToFov(lens);
+                if (fov <= 0f) continue;
+                // fov is in degrees, Math.tan works in radians.
+                lens.ratio = (float) (Math.tan(Math.toRadians(mainFov) / 2d) / Math.tan(Math.toRadians(fov) / 2d));
+                if (lens.ratio > 0.05f && lens.ratio < 0.95f && (widest == null || lens.ratio < widest.ratio)) {
+                    widest = lens;
+                }
+            }
+            if (widest == null) return;
+            // The wider sensor is streamed directly, so there is no zoom ratio to
+            // ask for: zoom is applied by cropping the incoming frame instead.
+            widest.zoomRatioRange = null;
+            widest.wide = true;
+            widest.label = String.format(Locale.US, "%.1f×", widest.ratio);
+            lenses.add(widest);
+            wideKey = widest.key;
+            wideRatio = Math.max(0.2f, widest.ratio);
+        } catch (Exception error) {
+            Log.w(TAG, "physical ultra wide scan failed", error);
+        }
+    }
+
+    private Lens buildLens(String cameraId, CameraCharacteristics characteristics) {
         Lens lens = new Lens();
         lens.cameraId = cameraId;
-        lens.physicalId = physicalId;
-        lens.system = system;
-        lens.key = physicalId == null ? cameraId : cameraId + "|" + physicalId;
+        lens.key = cameraId;
         float[] focalLengths = characteristics.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS);
         lens.focal = focalLengths != null && focalLengths.length > 0 ? focalLengths[0] : 0f;
         SizeF physicalSize = characteristics.get(CameraCharacteristics.SENSOR_INFO_PHYSICAL_SIZE);
@@ -306,7 +369,7 @@ class Camera2Controller {
         }
         int width = lens.activeArray == null ? 0 : lens.activeArray.width();
         if (width > 0) lens.maxCropZoom = Math.max(1f, Math.min(8f, width / 640f));
-        lenses.add(lens);
+        return lens;
     }
 
     private float focalLengthToFov(Lens lens) {
@@ -319,6 +382,9 @@ class Camera2Controller {
     // ------------------------------------------------------------------
 
     void start(String key) {
+        // Rescan before every fresh start: several vendors only expose the
+        // auxiliary rear lenses once the camera permission has been granted.
+        if (!open && !opening) scanLenses();
         requestedKey = key == null || key.isEmpty() ? mainKey : key;
         cameraHandler.post(() -> {
             if (textureView.isAvailable()) openLens(requestedKey);
@@ -364,9 +430,10 @@ class Camera2Controller {
         baseRatio = lens.key.equals(mainKey) ? 1f : Math.max(0.2f, lens.ratio);
         zoomRatioRange = lens.zoomRatioRange;
         activeArray = lens.activeArray;
+        configureFocus(lens);
 
         try {
-            StreamConfigurationMap map = cameraManager.getCameraCharacteristics(lens.cameraId)
+            StreamConfigurationMap map = characteristicsFor(lens)
                     .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             previewSize = pickSize(map.getOutputSizes(SurfaceTexture.class), MAX_PREVIEW_LONG_EDGE);
             jpegSize = pickSize(map.getOutputSizes(ImageReader.class), MAX_JPEG_LONG_EDGE);
@@ -383,7 +450,7 @@ class Camera2Controller {
             jpegReader = ImageReader.newInstance(jpegSize.getWidth(), jpegSize.getHeight(), android.graphics.ImageFormat.JPEG, 2);
             jpegReader.setOnImageAvailableListener(this::onJpegAvailable, cameraHandler);
 
-            jpegOrientation = computeJpegOrientation(lens.cameraId);
+            jpegOrientation = computeJpegOrientation(characteristicsFor(lens));
             applyTransform();
             cameraManager.openCamera(lens.cameraId, deviceCallback, cameraHandler);
         } catch (Exception error) {
@@ -444,17 +511,16 @@ class Camera2Controller {
 
     private void createSession() {
         try {
-            List<OutputConfiguration> configurations = new ArrayList<>();
-            OutputConfiguration previewConfig = new OutputConfiguration(previewSurface);
-            OutputConfiguration jpegConfig = new OutputConfiguration(jpegReader.getSurface());
-            if (activeLens.physicalId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                previewConfig.setPhysicalCameraId(activeLens.physicalId);
-                jpegConfig.setPhysicalCameraId(activeLens.physicalId);
-            }
-            configurations.add(previewConfig);
-            configurations.add(jpegConfig);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                device.createCaptureSessionByOutputConfigurations(configurations, createSessionCallback(), cameraHandler);
+            String physicalId = activeLens == null ? null : activeLens.physicalId;
+            if (physicalId != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                // The ultra wide lives behind the logical camera as a hidden sub
+                // camera, so both outputs have to be requested from it directly.
+                OutputConfiguration previewConfig = new OutputConfiguration(previewSurface);
+                previewConfig.setPhysicalCameraId(physicalId);
+                OutputConfiguration jpegConfig = new OutputConfiguration(jpegReader.getSurface());
+                jpegConfig.setPhysicalCameraId(physicalId);
+                device.createCaptureSessionByOutputConfigurations(
+                        Arrays.asList(previewConfig, jpegConfig), createSessionCallback(), cameraHandler);
             } else {
                 device.createCaptureSession(Arrays.asList(previewSurface, jpegReader.getSurface()),
                         createSessionCallback(), cameraHandler);
@@ -498,11 +564,34 @@ class Camera2Controller {
 
     void selectLens(String key) {
         requestedKey = key == null || key.isEmpty() ? mainKey : key;
-        cameraHandler.post(() -> openLens(requestedKey));
+        cameraHandler.post(() -> {
+            Lens lens = findLens(requestedKey);
+            if (lens != null && open && activeLens != null && activeLens.cameraId.equals(lens.cameraId)
+                    && samePhysical(activeLens, lens)) {
+                // The ultra wide entry is the same logical camera, only the zoom
+                // ratio differs, so the session can be reused.
+                float desired = baseRatio * zoomRel;
+                activeLens = lens;
+                baseRatio = lens.key.equals(mainKey) ? 1f : Math.max(0.2f, lens.ratio);
+                zoomRel = Math.max(0.5f, Math.min(8f, desired / baseRatio));
+                matrixZoom = computeMatrixZoom();
+                startRepeating();
+                applyTransform();
+                mainHandler.post(() -> listener.onCameraReady(buildInfo()));
+                return;
+            }
+            openLens(requestedKey);
+        });
     }
 
     void notifyPermissionDenied() {
         notifyError("permission", "相机权限被拒绝");
+    }
+
+    /** Two entries of one logical camera are only interchangeable on the same sensor. */
+    private static boolean samePhysical(Lens a, Lens b) {
+        if (a.physicalId == null) return b.physicalId == null;
+        return a.physicalId.equals(b.physicalId);
     }
 
     // ------------------------------------------------------------------
@@ -512,7 +601,7 @@ class Camera2Controller {
     private void startRepeating() {
         if (device == null || session == null || previewSurface == null) return;
         try {
-            session.setRepeatingRequest(buildPreviewRequest().build(), null, cameraHandler);
+            session.setRepeatingRequest(buildPreviewRequest().build(), focusCallback, cameraHandler);
         } catch (Exception error) {
             Log.w(TAG, "setRepeatingRequest failed", error);
         }
@@ -529,14 +618,22 @@ class Camera2Controller {
         builder.set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON);
         builder.set(CaptureRequest.FLASH_MODE,
                 torchOn ? CaptureRequest.FLASH_MODE_TORCH : CaptureRequest.FLASH_MODE_OFF);
-        if (focusLocked) {
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_AUTO);
-        } else {
-            builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE);
+        if (afSupported) {
+            if (pinnedFocusDistance != null && hasMode(afAvailableModes, CaptureRequest.CONTROL_AF_MODE_OFF)) {
+                // Locked: stop the autofocus algorithm entirely and hold the lens
+                // at the distance it converged on, so a later scene change cannot
+                // pull it back out of focus.
+                builder.set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_OFF);
+                builder.set(CaptureRequest.LENS_FOCUS_DISTANCE, pinnedFocusDistance);
+            } else {
+                builder.set(CaptureRequest.CONTROL_AF_MODE, focusMode());
+                if (afRegions != null) builder.set(CaptureRequest.CONTROL_AF_REGIONS, afRegions);
+            }
+            if (aeRegions != null) builder.set(CaptureRequest.CONTROL_AE_REGIONS, aeRegions);
         }
         float ratio = baseRatio * zoomRel;
         boolean useZoomRatio = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                && zoomRatioRange != null && activeLens.physicalId == null;
+                && zoomRatioRange != null && activeLens != null;
         if (useZoomRatio) {
             float target = Math.max(zoomRatioRange.getLower(), Math.min(zoomRatioRange.getUpper(), ratio));
             builder.set(CaptureRequest.CONTROL_ZOOM_RATIO, target);
@@ -552,8 +649,7 @@ class Camera2Controller {
 
     void setZoom(float rel) {
         zoomRel = Math.max(0.5f, Math.min(8f, rel));
-        float effective = effectiveZoom();
-        matrixZoom = Math.max(1f, zoomRel / effective);
+        matrixZoom = computeMatrixZoom();
         cameraHandler.post(() -> {
             if (!open) return;
             startRepeating();
@@ -561,9 +657,13 @@ class Camera2Controller {
         });
     }
 
+    /** Extra scale the viewfinder needs on top of what the sensor can deliver. */
+    private float computeMatrixZoom() {
+        return Math.max(1f, zoomRel / effectiveZoom());
+    }
+
     private float effectiveZoom() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-                && zoomRatioRange != null && activeLens != null && activeLens.physicalId == null) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && zoomRatioRange != null && activeLens != null) {
             float ratio = baseRatio * zoomRel;
             return Math.max(zoomRatioRange.getLower(), Math.min(zoomRatioRange.getUpper(), ratio)) / baseRatio;
         }
@@ -579,10 +679,237 @@ class Camera2Controller {
     }
 
     void setFocusLock(boolean lock) {
-        focusLocked = lock;
         cameraHandler.post(() -> {
-            if (open) startRepeating();
+            if (!afSupported) return;
+            focusLocked = lock;
+            if (!lock) {
+                clearFocusLock();
+                if (open) startRepeating();
+                return;
+            }
+            pinnedFocusDistance = null;
+            if (lastFocusDistance != null) {
+                // The lens is already settled: pin it where it stands.
+                pinnedFocusDistance = clampFocusDistance(lastFocusDistance);
+                if (open) startRepeating();
+            } else {
+                triggerFocusSweep();
+            }
         });
+    }
+
+    private void clearFocusLock() {
+        pinnedFocusDistance = null;
+        freezePending = false;
+        cameraHandler.removeCallbacks(freezeFallback);
+        resetFocusRegions();
+    }
+
+    private float clampFocusDistance(float distance) {
+        if (minimumFocusDistance <= 0f) return Math.max(0f, distance);
+        return Math.max(0f, Math.min(minimumFocusDistance, distance));
+    }
+
+    /**
+     * Focuses on a point of the viewfinder. Coordinates are normalised to the
+     * view ([0,1] with the origin at its top left corner); they are mapped back
+     * through the TextureView transform onto the sensor active array.
+     * A single tap keeps continuous autofocus around the point, a long press
+     * locks the lens after one autofocus sweep.
+     */
+    void focusAt(float nx, float ny, boolean lock) {
+        mainHandler.post(() -> {
+            int viewWidth = textureView.getWidth();
+            int viewHeight = textureView.getHeight();
+            float[] point = toBufferNormalized(nx, ny, viewWidth, viewHeight);
+            cameraHandler.post(() -> applyFocus(point[0], point[1], lock));
+        });
+    }
+
+    private void applyFocus(float u, float v, boolean lock) {
+        if (!afSupported) return;
+        focusLocked = lock;
+        pinnedFocusDistance = null;
+        freezePending = false;
+        cameraHandler.removeCallbacks(freezeFallback);
+        float crop = cropFactor();
+        float arrayX = Math.max(0f, Math.min(1f, 0.5f + (u - 0.5f) / crop));
+        float arrayY = Math.max(0f, Math.min(1f, 0.5f + (v - 0.5f) / crop));
+        afRegions = buildRegion(arrayX, arrayY, maxAfRegions);
+        aeRegions = buildRegion(arrayX, arrayY, maxAeRegions);
+        triggerFocusSweep();
+    }
+
+    /**
+     * Runs one autofocus sweep around the current regions. When the request is a
+     * long press the lens is frozen at the distance the sweep converged on,
+     * otherwise autofocus stays continuous so a tap keeps tracking the scene.
+     */
+    private void triggerFocusSweep() {
+        if (session == null || device == null) return;
+        try {
+            CaptureRequest.Builder start = buildPreviewRequest();
+            start.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_START);
+            freezePending = focusLocked;
+            cameraHandler.removeCallbacks(freezeFallback);
+            if (freezePending) cameraHandler.postDelayed(freezeFallback, FREEZE_TIMEOUT_MS);
+            session.capture(start.build(), focusCallback, cameraHandler);
+            CaptureRequest.Builder repeat = buildPreviewRequest();
+            repeat.set(CaptureRequest.CONTROL_AF_TRIGGER, CaptureRequest.CONTROL_AF_TRIGGER_IDLE);
+            session.setRepeatingRequest(repeat.build(), focusCallback, cameraHandler);
+        } catch (Exception error) {
+            Log.w(TAG, "focus sweep failed", error);
+        }
+    }
+
+    private final CameraCaptureSession.CaptureCallback focusCallback = new CameraCaptureSession.CaptureCallback() {
+        @Override
+        public void onCaptureCompleted(CameraCaptureSession captureSession, CaptureRequest request,
+                                       TotalCaptureResult result) {
+            Float distance = result.get(CaptureResult.LENS_FOCUS_DISTANCE);
+            if (distance != null) lastFocusDistance = distance;
+            if (!freezePending) return;
+            Integer state = result.get(CaptureResult.CONTROL_AF_STATE);
+            if (state != null && (state == CaptureResult.CONTROL_AF_STATE_FOCUSED_LOCKED
+                    || state == CaptureResult.CONTROL_AF_STATE_NOT_FOCUSED_LOCKED)) {
+                pinFocusDistance(distance);
+            }
+        }
+    };
+
+    private final Runnable freezeFallback = new Runnable() {
+        @Override
+        public void run() {
+            pinFocusDistance(null);
+        }
+    };
+
+    private void pinFocusDistance(Float distance) {
+        if (!freezePending) return;
+        freezePending = false;
+        cameraHandler.removeCallbacks(freezeFallback);
+        Float value = distance != null ? distance : lastFocusDistance;
+        if (value == null || !hasMode(afAvailableModes, CaptureRequest.CONTROL_AF_MODE_OFF)) return;
+        pinnedFocusDistance = clampFocusDistance(value);
+        if (open) startRepeating();
+    }
+
+    private void configureFocus(Lens lens) {
+        afSupported = false;
+        afAvailableModes = null;
+        maxAfRegions = 0;
+        maxAeRegions = 0;
+        focusBounds = null;
+        afRegions = null;
+        aeRegions = null;
+        pinnedFocusDistance = null;
+        lastFocusDistance = null;
+        minimumFocusDistance = 0f;
+        freezePending = false;
+        cameraHandler.removeCallbacks(freezeFallback);
+        try {
+            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(lens.cameraId);
+            Integer maxAf = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AF);
+            Integer maxAe = characteristics.get(CameraCharacteristics.CONTROL_MAX_REGIONS_AE);
+            maxAfRegions = maxAf == null ? 0 : maxAf;
+            maxAeRegions = maxAe == null ? 0 : maxAe;
+            afAvailableModes = characteristics.get(CameraCharacteristics.CONTROL_AF_AVAILABLE_MODES);
+            Float minFocus = characteristics.get(CameraCharacteristics.LENS_INFO_MINIMUM_FOCUS_DISTANCE);
+            minimumFocusDistance = minFocus == null ? 0f : minFocus;
+            focusBounds = lens.activeArray != null ? lens.activeArray
+                    : characteristics.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+            afSupported = focusBounds != null && focusMode() != null;
+            resetFocusRegions();
+        } catch (Exception error) {
+            Log.w(TAG, "configureFocus failed", error);
+        }
+        if (!afSupported) focusLocked = false;
+    }
+
+    private static boolean hasMode(int[] modes, int mode) {
+        if (modes == null) return false;
+        for (int value : modes) {
+            if (value == mode) return true;
+        }
+        return false;
+    }
+
+    /** First mode of [candidates] supported by the active camera, or null. */
+    private Integer firstMode(int... candidates) {
+        for (int mode : candidates) {
+            if (hasMode(afAvailableModes, mode)) return mode;
+        }
+        return null;
+    }
+
+    private Integer focusMode() {
+        if (focusLocked) {
+            // A single autofocus sweep parks the lens, which is what a long
+            // press should do; macro lenses are fixed at close range so they are
+            // only used as a last resort.
+            return firstMode(CaptureRequest.CONTROL_AF_MODE_AUTO,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
+                    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO,
+                    CaptureRequest.CONTROL_AF_MODE_MACRO);
+        }
+        return firstMode(CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE,
+                CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_VIDEO,
+                CaptureRequest.CONTROL_AF_MODE_AUTO,
+                CaptureRequest.CONTROL_AF_MODE_MACRO);
+    }
+
+    private void resetFocusRegions() {
+        afRegions = fullRegion(maxAfRegions);
+        aeRegions = fullRegion(maxAeRegions);
+    }
+
+    private MeteringRectangle[] fullRegion(int maxRegions) {
+        if (maxRegions <= 0 || focusBounds == null) return null;
+        return new MeteringRectangle[]{
+                new MeteringRectangle(focusBounds, MeteringRectangle.METERING_WEIGHT_MAX)};
+    }
+
+    private MeteringRectangle[] buildRegion(float arrayX, float arrayY, int maxRegions) {
+        if (maxRegions <= 0 || focusBounds == null) return null;
+        int side = Math.max(2, Math.round(Math.min(focusBounds.width(), focusBounds.height()) * 0.16f));
+        int centerX = focusBounds.left + Math.round(arrayX * focusBounds.width());
+        int centerY = focusBounds.top + Math.round(arrayY * focusBounds.height());
+        int left = Math.max(focusBounds.left, Math.min(focusBounds.right - 1, centerX - side / 2));
+        int top = Math.max(focusBounds.top, Math.min(focusBounds.bottom - 1, centerY - side / 2));
+        int right = Math.max(left + 1, Math.min(focusBounds.right, left + side));
+        int bottom = Math.max(top + 1, Math.min(focusBounds.bottom, top + side));
+        return new MeteringRectangle[]{
+                new MeteringRectangle(left, top, right - left, bottom - top,
+                        MeteringRectangle.METERING_WEIGHT_MAX)};
+    }
+
+    /**
+     * How much the streamed buffer is cropped into the active array, so buffer
+     * normalised coordinates can be projected back onto the sensor.
+     */
+    private float cropFactor() {
+        if (activeLens == null) return 1f;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && zoomRatioRange != null) {
+            float ratio = baseRatio * zoomRel;
+            return Math.max(zoomRatioRange.getLower(), Math.min(zoomRatioRange.getUpper(), ratio));
+        }
+        return Math.max(1f, Math.min(activeLens.maxCropZoom, zoomRel));
+    }
+
+    /**
+     * Inverts the TextureView transform so a point of the view can be expressed
+     * in normalised buffer coordinates ([0,1] with the origin at the top left of
+     * the camera frame).
+     */
+    private float[] toBufferNormalized(float nx, float ny, int viewWidth, int viewHeight) {
+        Matrix matrix = displayMatrix(viewWidth, viewHeight);
+        Matrix inverse = new Matrix();
+        if (matrix == null || viewWidth <= 0 || viewHeight <= 0 || !matrix.invert(inverse)) {
+            return new float[]{0.5f, 0.5f};
+        }
+        float[] point = new float[]{nx * viewWidth, ny * viewHeight};
+        inverse.mapPoints(point);
+        return new float[]{point[0] / viewWidth, point[1] / viewHeight};
     }
 
     boolean supportsTorch() {
@@ -710,6 +1037,7 @@ class Camera2Controller {
             info.put("width", previewSize == null ? 0 : previewSize.getWidth());
             info.put("height", previewSize == null ? 0 : previewSize.getHeight());
             info.put("torch", supportsTorch());
+            info.put("focus", afSupported);
             info.put("maxZoom", activeLens.maxCropZoom);
             JSONArray array = new JSONArray();
             for (Lens lens : lenses) array.put(lensJson(lens));
@@ -720,6 +1048,7 @@ class Camera2Controller {
     }
 
     private void notifyError(String code, String detail) {
+        Log.w(TAG, "notifyError " + code + " " + detail);
         mainHandler.post(() -> listener.onCameraError(code, detail));
     }
 
@@ -741,20 +1070,26 @@ class Camera2Controller {
         return bestSmall != null ? bestSmall : bestLarge;
     }
 
-    private int computeJpegOrientation(String cameraId) {
-        try {
-            CameraCharacteristics characteristics = cameraManager.getCameraCharacteristics(cameraId);
-            Integer sensor = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
-            if (sensor == null) sensor = 90;
-            int rotation = displayRotationDegrees();
-            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
-            if (facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT) {
-                return (sensor + rotation) % 360;
-            }
-            return (sensor - rotation + 360) % 360;
-        } catch (Exception error) {
-            return 90;
+    private int computeJpegOrientation(CameraCharacteristics characteristics) {
+        Integer sensor = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+        if (sensor == null) sensor = 90;
+        int rotation = displayRotationDegrees();
+        Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+        if (facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT) {
+            return (sensor + rotation) % 360;
         }
+        return (sensor - rotation + 360) % 360;
+    }
+
+    private CameraCharacteristics characteristicsFor(Lens lens) throws CameraAccessException {
+        if (lens.physicalId != null) {
+            try {
+                return cameraManager.getCameraCharacteristics(lens.physicalId);
+            } catch (Exception error) {
+                Log.w(TAG, "physical characteristics " + lens.physicalId + " failed: " + error);
+            }
+        }
+        return cameraManager.getCameraCharacteristics(lens.cameraId);
     }
 
     private int displayRotationDegrees() {
@@ -777,16 +1112,65 @@ class Camera2Controller {
         }
     }
 
+    /**
+     * Clockwise angle the camera buffer needs to be rotated so it appears
+     * upright on the current screen orientation.
+     */
+    private int previewRotation() {
+        if (activeLens == null) return 0;
+        try {
+            CameraCharacteristics characteristics = characteristicsFor(activeLens);
+            Integer sensor = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
+            if (sensor == null) sensor = 90;
+            Integer facing = characteristics.get(CameraCharacteristics.LENS_FACING);
+            int rotation = displayRotationDegrees();
+            if (facing != null && facing == CameraCharacteristics.LENS_FACING_FRONT) {
+                return (sensor + rotation) % 360;
+            }
+            return 0;
+        } catch (Exception error) {
+            return 0;
+        }
+    }
+
+    /**
+     * Fits the (rotated) camera buffer inside the view with a centred contain
+     * scale, so the web layer can keep mapping frame pixels to screen pixels
+     * with the same contain maths.
+     */
     void applyTransform() {
         mainHandler.post(() -> {
             if (previewSize == null) return;
             int viewWidth = textureView.getWidth();
             int viewHeight = textureView.getHeight();
             if (viewWidth <= 0 || viewHeight <= 0) return;
-            float fit = Math.min((float) viewWidth / previewSize.getWidth(),
-                    (float) viewHeight / previewSize.getHeight()) * matrixZoom;
-            float scaleX = previewSize.getWidth() * fit / viewWidth;
-            float scaleY = previewSize.getHeight() * fit / viewHeight;
-            Matrix matrix = new Matrix();
-            matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f);
-            textureView.setTransform(matrix)
+            Matrix matrix = displayMatrix(viewWidth, viewHeight);
+            if (matrix != null) textureView.setTransform(matrix);
+        });
+    }
+
+    /**
+     * Transform applied on top of the TextureView stretch (view space). Shared
+     * with the focus maths so a tap can be mapped back to the camera buffer.
+     */
+    private Matrix displayMatrix(int viewWidth, int viewHeight) {
+        if (previewSize == null || viewWidth <= 0 || viewHeight <= 0) return null;
+        int rotation = previewRotation();
+        Matrix matrix = new Matrix();
+        if (rotation == 0) {
+            float heightScale = (viewWidth * previewSize.getWidth())
+                    / (viewHeight * (float) previewSize.getHeight());
+            matrix.setScale(matrixZoom, matrixZoom * heightScale, viewWidth / 2f, viewHeight / 2f);
+            return matrix;
+        }
+        boolean swap = rotation == 90 || rotation == 270;
+        float shownWidth = swap ? previewSize.getHeight() : previewSize.getWidth();
+        float shownHeight = swap ? previewSize.getWidth() : previewSize.getHeight();
+        float fit = Math.min(viewWidth / shownWidth, viewHeight / shownHeight) * matrixZoom;
+        float scaleX = previewSize.getWidth() * fit / viewWidth;
+        float scaleY = previewSize.getHeight() * fit / viewHeight;
+        matrix.setScale(scaleX, scaleY, viewWidth / 2f, viewHeight / 2f);
+        matrix.postRotate(rotation, viewWidth / 2f, viewHeight / 2f);
+        return matrix;
+    }
+}
